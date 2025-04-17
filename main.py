@@ -9,6 +9,10 @@ from PIL import Image
 from supabase import create_client, Client
 from datetime import datetime
 import google.generativeai as genai
+import gdown
+
+# Clear cache to avoid stale model files
+st.cache_resource.clear()
 
 # ------------------------- SUPABASE CONFIGURATION -------------------------
 SUPABASE_URL = "https://nnvjlzsmqzqmzyobqwfw.supabase.co"
@@ -20,7 +24,7 @@ GOOGLE_API_KEY = "AIzaSyCGn_JarFPfoPcNxmB7hDCy1cLgJm8TSYs"
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # Initialize the generative model with a faster model
-chatbot_model = genai.GenerativeModel('gemini-1.5-flash-002')  # Switched to a faster model
+chatbot_model = genai.GenerativeModel('gemini-1.5-flash-002')
 
 # ------------------------- BACKGROUND IMAGE FUNCTION -------------------------
 def get_image_base64(image_path):
@@ -88,11 +92,11 @@ def login_page():
                 session = supabase.auth.sign_in_with_password({"email": email, "password": password})
                 uuid = session.user.id
 
-                    # Combine into a single dictionary
+                # Combine into a single dictionary
                 supabase.table("profiles").insert({
-                        "email": email,
-                        "uuid": uuid,
-                        "password": password  # ⚠️ Not recommended to store raw passwords!
+                    "email": email,
+                    "uuid": uuid,
+                    "password": password  # ⚠️ Not recommended to store raw passwords!
                 }).execute()
 
                 st.success("Account created! Please log in.")
@@ -116,20 +120,74 @@ def login_page():
 st.set_page_config(page_title="Plant Disease Classifier", page_icon="🌿")
 
 @st.cache_resource
+def download_model():
+    model_path = "trained_model/plant_disease_prediction_model.h5"
+    if not os.path.exists(model_path):
+        os.makedirs("trained_model", exist_ok=True)
+        url = "https://drive.google.com/uc?id=YOUR_FILE_ID"  # Replace with your Google Drive file ID
+        st.write(f"Downloading model from Google Drive to: {model_path}")
+        try:
+            gdown.download(url, model_path, quiet=False)
+        except Exception as e:
+            st.error(f"Failed to download model from Google Drive: {e}")
+            raise
+    st.write(f"Model path: {model_path}")
+    st.write(f"File exists: {os.path.exists(model_path)}")
+    st.write(f"File size: {os.path.getsize(model_path)} bytes")
+    return model_path
+
+@st.cache_resource
 def load_model(model_path):
-    return tf.keras.models.load_model(model_path)
+    st.write(f"Attempting to load model from: {model_path}")
+    if not os.path.exists(model_path):
+        st.error(f"Model file not found at: {model_path}")
+        raise FileNotFoundError(f"Model file not found at: {model_path}")
+    
+    file_size = os.path.getsize(model_path)
+    st.write(f"File size: {file_size} bytes")
+    if file_size < 10000:  # Check for Git LFS pointer file
+        st.error("File is likely a Git LFS pointer, not the actual model.")
+        raise ValueError("Invalid model file: Likely a Git LFS pointer.")
+    
+    try:
+        with h5py.File(model_path, 'r') as f:
+            st.write("Valid HDF5 file")
+    except Exception as e:
+        st.error(f"Invalid HDF5 file: {e}")
+        raise ValueError(f"Invalid HDF5 file: {e}")
+    
+    try:
+        model = tf.keras.models.load_model(model_path)
+        st.write("Model loaded successfully")
+        return model
+    except Exception as e:
+        st.error(f"Failed to load model: {e}")
+        raise RuntimeError(f"Failed to load model: {e}")
 
 @st.cache_resource
 def load_class_indices(class_file_path):
+    st.write(f"Attempting to load class indices from: {class_file_path}")
+    if not os.path.exists(class_file_path):
+        st.error(f"Class indices file not found at: {class_file_path}")
+        raise FileNotFoundError(f"Class indices file not found at: {class_file_path}")
     with open(class_file_path, 'r') as f:
         return json.load(f)
 
 working_dir = os.path.dirname(os.path.abspath(__file__))
-model_path = f"{working_dir}/trained_model/plant_disease_prediction_model.h5"
-class_file_path = f"{working_dir}/class_indices.json"
-
-disease_model = load_model(model_path)
-class_indices = load_class_indices(class_file_path)
+st.write(f"Current working directory: {working_dir}")
+try:
+    model_path = download_model()
+    st.write("Root directory contents:", os.listdir(working_dir))
+    if os.path.exists(f"{working_dir}/trained_model"):
+        st.write("Trained model directory contents:", os.listdir(f"{working_dir}/trained_model"))
+    else:
+        st.write("Trained model directory does not exist, created during download.")
+    class_file_path = f"{working_dir}/class_indices.json"
+    disease_model = load_model(model_path)
+    class_indices = load_class_indices(class_file_path)
+except Exception as e:
+    st.error(f"Error loading model or class indices: {e}")
+    st.stop()
 
 # ------------------------- IMAGE PROCESSING -------------------------
 @st.cache_data
@@ -219,20 +277,17 @@ def get_user_history(user_id):
 def get_disease_info(disease_name):
     try:
         if "access_token" in st.session_state and "refresh_token" in st.session_state:
-                        supabase.auth.set_session(
-                            st.session_state["access_token"], st.session_state["refresh_token"]
-                        )
-
-                        response = supabase.table("disease")\
-                        .select(
-                            "disease_name, description, "
-                            "symptoms(symptom_description), "
-                            "treatment_suggestions(treatment_description), "
-                            "fertiliser(fertiliser_name, type)"
-                        )\
-                        .eq("disease_name", disease_name)\
-                        .execute()
-
+            supabase.auth.set_session(st.session_state["access_token"], st.session_state["refresh_token"])
+        
+        response = supabase.table("disease")\
+            .select(
+                "disease_name, description, "
+                "symptoms(symptom_description), "
+                "treatment_suggestions(treatment_description), "
+                "fertiliser(fertiliser_name, type)"
+            )\
+            .eq("disease_name", disease_name)\
+            .execute()
 
         if response.data:
             disease_info = response.data[0]
@@ -256,10 +311,10 @@ def get_disease_info(disease_name):
     except Exception as e:
         st.error(f"Database fetch error: {e}")
         return None
+
 # ------------------------- CHATBOT FUNCTION WITH GOOGLE API -------------------------
 def agriculture_chatbot(user_input):
     try:
-        # Simplified prompt for faster processing
         prompt = f"As an agricultural expert, answer this: {user_input}"
         response = chatbot_model.generate_content(prompt)
         return response.text
